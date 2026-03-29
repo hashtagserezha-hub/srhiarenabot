@@ -1,8 +1,29 @@
 import aiosqlite
 import json
 import logging
+import time
 
 DB_NAME = 'database.db'
+
+# ============================================================
+# Простой кэш с TTL (время жизни 5 минут)
+# ============================================================
+_CACHE: dict = {}
+CACHE_TTL = 300  # секунд
+
+def _cache_get(key: str):
+    entry = _CACHE.get(key)
+    if entry and time.monotonic() - entry['ts'] < CACHE_TTL:
+        return entry['data']
+    return None
+
+def _cache_set(key: str, data):
+    _CACHE[key] = {'data': data, 'ts': time.monotonic()}
+
+def invalidate_cache():
+    """Cбрасывает весь кэш. Вызывать при любом изменении данных."""
+    _CACHE.clear()
+    logging.info("🔁 Кэш инвалидирован.")
 
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
@@ -46,11 +67,29 @@ async def get_user_score(telegram_id: int):
             row = await cursor.fetchone()
             return row[0] if row else 0
 
+async def ensure_resource_exists(resource_name: str):
+    """Добавляет ресурс в items если его там ещё нет."""
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
+            'INSERT OR IGNORE INTO items (name, category, icon) VALUES (?, ?, ?)',
+            (resource_name.lower().strip(), "💎 Ресурсы и прочее", "💎")
+        )
+        if cursor.rowcount > 0:
+            await db.commit()
+            invalidate_cache()  # новый ресурс появился, сбрасываем
+        else:
+            await db.commit()
+
 async def get_all_categories():
+    cached = _cache_get('categories')
+    if cached is not None:
+        return cached
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute('SELECT DISTINCT category FROM items WHERE category IS NOT NULL AND category != "📦 Без категории" AND category != ""') as cursor:
             rows = await cursor.fetchall()
-            return [row[0] for row in rows]
+            result = [row[0] for row in rows]
+            _cache_set('categories', result)
+            return result
 
 async def get_items_by_category(category):
     async with aiosqlite.connect(DB_NAME) as db:
@@ -65,8 +104,10 @@ async def get_uncategorized_items():
             return [{"id": row[0], "name": row[1], "icon": row[2]} for row in rows]
 
 async def get_all_resources():
+    cached = _cache_get('resources')
+    if cached is not None:
+        return cached
     async with aiosqlite.connect(DB_NAME) as db:
-        # Ресурсы, которые используются хотя бы в одном рецепте
         query = '''
             SELECT i.id, i.name 
             FROM items i 
@@ -75,7 +116,9 @@ async def get_all_resources():
         '''
         async with db.execute(query) as cursor:
             rows = await cursor.fetchall()
-            return [{"id": row[0], "name": row[1]} for row in rows]
+            result = [{"id": row[0], "name": row[1]} for row in rows]
+            _cache_set('resources', result)
+            return result
 
 async def get_recipe(item_name: str):
     async with aiosqlite.connect(DB_NAME) as db:
@@ -96,6 +139,9 @@ async def get_item_name_by_id(item_id: int):
             return row[0] if row else None
 
 async def get_all_names():
+    cached = _cache_get('all_names')
+    if cached is not None:
+        return cached
     names = set()
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute('SELECT name FROM items') as cursor:
@@ -104,7 +150,9 @@ async def get_all_names():
         async with db.execute('SELECT DISTINCT resource_name FROM recipes') as cursor:
             for row in await cursor.fetchall():
                 names.add(row[0])
-    return sorted(list(names))
+    result = sorted(list(names))
+    _cache_set('all_names', result)
+    return result
 
 async def create_proposal(user_id: int, p_type: str, data: dict):
     async with aiosqlite.connect(DB_NAME) as db:
@@ -163,6 +211,8 @@ async def apply_proposal(proposal_id: int):
         ''', (proposal['user_id'], points, points))
         
         await db.commit()
+        # Инвалидируем кэш после любого изменения базы
+        invalidate_cache()
         await update_proposal_status(proposal_id, 'approved')
     return True
 
