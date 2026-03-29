@@ -53,41 +53,75 @@ async def my_profile(message: types.Message):
     )
     await message.answer(text, parse_mode="HTML")
 
-# Команды добавления и редактирования
-@dp.message(Command("add"))
-async def add_cmd(message: types.Message, state: FSMContext):
-    await state.update_data(p_type="add")
-    await state.set_state(ProposalState.waiting_for_name)
-    await message.answer("Введите точное название нового предмета:", reply_markup=ReplyKeyboardRemove())
+# --- Отмена ---
+@dp.message(Command("cancel"))
+@dp.message(F.text.lower() == "отмена")
+async def cancel_cmd(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Нечего отменять! Просто напишите название предмета или ресурса для поиска.", reply_markup=ReplyKeyboardRemove())
+        return
+    await state.clear()
+    await message.answer("❌ Действие отменено. Что хотите узнать?", reply_markup=ReplyKeyboardRemove())
 
-@dp.message(Command("edit"))
-async def edit_cmd(message: types.Message, state: FSMContext):
-    await state.update_data(p_type="edit")
-    await state.set_state(ProposalState.waiting_for_name)
-    await message.answer("Введите название существующего предмета, который вы хотите отредактировать:", reply_markup=ReplyKeyboardRemove())
+# --- Приветствия ---
+GREETINGS = {"привет", "прив", "хай", "ку", "q", "hi", "hey", "hello", "aloha", "zdravstvuy", "zdarova", "здарова", "здравствуй", "добрый день", "доброе утро", "добрый вечер", "приветик", "хеллоу", "хело"}
+
+@dp.message()
+async def handle_greeting_or_lookup(message: types.Message, state: FSMContext):
+    if not message.text:
+        return
+    text_lower = message.text.lower().strip()
+    # Проверка на приветствие (сначала)
+    if text_lower in GREETINGS or any(text_lower.startswith(g + ' ') for g in GREETINGS) or any(text_lower.endswith(' ' + g) for g in GREETINGS):
+        await message.answer(
+            f"👋 Привет! Просто напиши название предмета или ресурса, и я найду рецепт! Если нужен полный список — напиши <i>Список</i>.",
+            parse_mode="HTML"
+        )
+        return
+    await crafting_lookup(message)
+
+# Основной обработчик сообщений
+async def crafting_lookup(message: types.Message):
+    pass  # тело ниже
 
 # --- FSM Хэндлеры ---
 @dp.message(ProposalState.waiting_for_name)
 async def process_proposal_name(message: types.Message, state: FSMContext):
+    if message.text.strip().lower() in ["❌ отмена", "отмена", "/cancel"]:
+        await state.clear()
+        await message.answer("❌ Действие отменено.", reply_markup=ReplyKeyboardRemove())
+        return
     await state.update_data(name=message.text.strip())
     cats = await db.get_all_categories()
     kb = [[KeyboardButton(text=c)] for c in cats]
     kb.append([KeyboardButton(text="📦 Без категории")])
+    kb.append([KeyboardButton(text="❌ Отмена")])
     keyboard = ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True, one_time_keyboard=True)
     await state.set_state(ProposalState.waiting_for_category)
     await message.answer("Выберите или введите категорию для этого предмета:", reply_markup=keyboard)
 
 @dp.message(ProposalState.waiting_for_category)
 async def process_proposal_category(message: types.Message, state: FSMContext):
+    if message.text.strip().lower() in ["❌ отмена", "отмена", "/cancel"]:
+        await state.clear()
+        await message.answer("❌ Действие отменено.", reply_markup=ReplyKeyboardRemove())
+        return
     category = message.text.strip()
     icon = "📦" if "📦" in category else category.split()[0] if category else "📦"
     await state.update_data(category=category, icon=icon, recipe={})
     await state.set_state(ProposalState.waiting_for_resources)
-    await message.answer("Отправляйте ресурсы по одному в формате `Название: Количество`. Например:\n`Мыло: 2`\n\nКогда добавите все ресурсы, напишите слово **Готово**.", parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+    kb = [[KeyboardButton(text="❌ Отмена")]]
+    keyboard = ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True, one_time_keyboard=False)
+    await message.answer("Отправляйте ресурсы по одному в формате `Название: Количество`. Например:\n`Мыло: 2`\n\nКогда добавите все ресурсы, напишите слово **Готово**.", parse_mode="Markdown", reply_markup=keyboard)
 
 @dp.message(ProposalState.waiting_for_resources)
 async def process_proposal_resources(message: types.Message, state: FSMContext):
     text = message.text.strip()
+    if text.lower() in ["❌ отмена", "отмена", "/cancel"]:
+        await state.clear()
+        await message.answer("❌ Действие отменено.", reply_markup=ReplyKeyboardRemove())
+        return
     if text.lower() == "готово":
         data = await state.get_data()
         recipe = data.get("recipe", {})
