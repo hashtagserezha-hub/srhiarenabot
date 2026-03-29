@@ -9,7 +9,7 @@ DB_NAME = 'database.db'
 # Простой кэш с TTL (время жизни 5 минут)
 # ============================================================
 _CACHE: dict = {}
-CACHE_TTL = 300  # секунд
+CACHE_TTL = 3600  # секунд
 
 def _cache_get(key: str):
     entry = _CACHE.get(key)
